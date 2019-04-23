@@ -1,118 +1,69 @@
-const functions = require('firebase-functions');
-const { Storage } = require('@google-cloud/storage');
+const functions = require("firebase-functions");
+const admin = require('firebase-admin');
 const os = require('os');
+const fs = require('fs');
 const path = require('path');
 const spawn = require('child-process-promise').spawn;
 
-
-const admin = require("firebase-admin");
-
-const serviceAccount = require("path/to/serviceAccountKey.json");
-
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  databaseURL: "https://shiftr-9f44e.firebaseio.com"
-});
-
-const projectId = 'shiftr-9f44e'
-let gcs = new Storage ({
-    projectId
-  });    
+admin.initializeApp()
 
 
 
-// // Create and Deploy Your First Cloud Functions
-// // https://firebase.google.com/docs/functions/write-firebase-functions
-//
-exports.onFileFinalize = functions.storage.object().onFinalize(event => {
+// const projectId = 'shiftr-9f44e';
 
-    const object = event.data;
-    const bucket = event.bucket;
-    const contentType = event.contentType;
-    const filePath = event.name;
 
-    console.log("File change detected, function execution started");
 
-    if (object.resourceState === "not_exists") {
-      console.log("We deleted a file, exit...");
-      return;
-    }
-  
-    if (path.basename(filePath).startsWith("resized-")) {
-      console.log("We already renamed that file!");
-      return;
-    }
-  
-    const destBucket = gcs.bucket(bucket);
-    const tmpFilePath = path.join(os.tmpdir(), path.basename(filePath));
-    const metadata = { contentType: contentType };
-    return destBucket
-      .file(filePath)
-      .download({
-        destination: tmpFilePath
-      })
-      .then(() => {
-        return spawn("convert", [tmpFilePath, "-resize", "500x500", tmpFilePath]);
-      })
-      .then(() => {
-        return destBucket.upload(tmpFilePath, {
-          destination: "resized-" + path.basename(filePath),
-          metadata: metadata
-        });
-      });
-  });
-  
-  exports.uploadFile = functions.https.onRequest((req, res) => {
-    cors(req, res, () => {
-      if (req.method !== "POST") {
-        return res.status(500).json({
-          message: "Not allowed"
-        });
+// [START generateThumbnail]
+/**
+ * When an image is uploaded in the Storage bucket We generate a thumbnail automatically using
+ * ImageMagick.
+ */
+// [START generateThumbnailTrigger]
+exports.generateThumbnail = functions.storage.object().onFinalize(async (object) => {
+    // [END generateThumbnailTrigger]
+      // [START eventAttributes]
+      const fileBucket = object.bucket; // The Storage bucket that contains the file.
+      const filePath = object.name; // File path in the bucket.
+      const contentType = object.contentType; // File content type.
+      const metageneration = object.metageneration; // Number of times metadata has been generated. New objects have a value of 1.
+      // [END eventAttributes]
+    
+      // [START stopConditions]
+      // Exit if this is triggered on a file that is not an image.
+      if (!contentType.startsWith('image/')) {
+        return console.log('This is not an image.');
       }
-      const busboy = new Busboy({ headers: req.headers });
-      let uploadData = null;
-  
-      busboy.on("file", (fieldname, file, filename, encoding, mimetype) => {
-        const filepath = path.join(os.tmpdir(), filename);
-        uploadData = { file: filepath, type: mimetype };
-        file.pipe(fs.createWriteStream(filepath));
-      });
-  
-      busboy.on("finish", () => {
-        const bucket = gcs.bucket("fb-cloud-functions-demo.appspot.com");
-        bucket
-          .upload(uploadData.file, {
-            uploadType: "media",
-            metadata: {
-              metadata: {
-                contentType: uploadData.type
-              }
-            }
-          })
-          .then(() => {
-            res.status(200).json({
-              message: "It worked!"
-            });
-          })
-          .catch(err => {
-            res.status(500).json({
-              error: err
-            });
-          });
-      });
-      busboy.end(req.rawBody);
-    });
-  });
-  
-  exports.onDataAdded = functions.database.ref('/message/{id}').onCreate(event => {
-      const data = event.data.val();
-      const newData = {
-          msg: event.params.id + '-' + data.msg.toUpperCase()
+    
+      // Get the file name.
+      const fileName = path.basename(filePath);
+      // Exit if the image is already a thumbnail.
+      if (fileName.startsWith('thumb_')) {
+        return console.log('Already a Thumbnail.');
+      }
+      // [END stopConditions]
+    
+      // [START thumbnailGeneration]
+      // Download file from bucket.
+      const bucket = admin.storage().bucket(fileBucket);
+      const tempFilePath = path.join(os.tmpdir(), fileName);
+      const metadata = {
+        contentType: contentType,
       };
-      return event.data.ref.child('copiedData').set(newData);
-  });
-  
-exports.onFileDelete = functions.storage.object().onDelete(event => {
-    console.log(event)
-    return;
-});
+      await bucket.file(filePath).download({destination: tempFilePath});
+      console.log('Image downloaded locally to', tempFilePath);
+      // Generate a thumbnail using ImageMagick.
+      await spawn('convert', [tempFilePath, '-thumbnail', '200x200>', tempFilePath]);
+      console.log('Thumbnail created at', tempFilePath);
+      // We add a 'thumb_' prefix to thumbnails file name. That's where we'll upload the thumbnail.
+      const thumbFileName = `thumb_${fileName}`;
+      const thumbFilePath = path.join(path.dirname(filePath), thumbFileName);
+      // Uploading the thumbnail.
+      await bucket.upload(tempFilePath, {
+        destination: thumbFilePath,
+        metadata: metadata,
+      });
+      // Once the thumbnail has been uploaded delete the local file to free up disk space.
+      return fs.unlinkSync(tempFilePath);
+      // [END thumbnailGeneration]
+    });
+    // [END generateThumbnail]

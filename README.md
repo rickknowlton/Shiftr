@@ -1,0 +1,1 @@
+SHIFTR hooks to Google Firebase and uses Firebase Functions to transform images into thumbnails.
